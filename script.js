@@ -14,7 +14,7 @@ const APP_CONFIG = {
 
   // ThingsBoard API Configuration (Can be customized via Settings Modal and saved in localStorage)
   thingsboard: {
-    serverUrl: 'http://demo.thingsboard.io', // ThingsBoard Demo instance
+    serverUrl: 'https://demo.thingsboard.io', // ThingsBoard Demo HTTPS endpoint
     deviceId: '81383a60-bb11-11f1-9681-6110e8f55c0f', // User's device UUID
     publicToken: '', // Read-only public dashboard token or JWT
     pollIntervalMs: 5000,
@@ -735,7 +735,13 @@ function bindEventListeners() {
     btnAuthLogin.addEventListener('click', async () => {
       const email = document.getElementById('tbEmail').value.trim();
       const password = document.getElementById('tbPassword').value;
-      const serverUrl = (elements.cfgServerUrl.value.trim() || 'http://demo.thingsboard.io').replace(/\/+$/, '');
+      
+      let serverUrl = (elements.cfgServerUrl.value.trim() || 'https://demo.thingsboard.io').replace(/\/+$/, '');
+      if (serverUrl.includes('thingsboard.cloud') || serverUrl.startsWith('http://')) {
+        serverUrl = 'https://demo.thingsboard.io';
+        elements.cfgServerUrl.value = serverUrl;
+      }
+      elements.cfgDeviceId.value = '81383a60-bb11-11f1-9681-6110e8f55c0f';
 
       if (!email || !password) {
         showToast('Please enter your ThingsBoard email and password.', 'warn');
@@ -851,7 +857,12 @@ function loadStoredPreferences() {
       if (parsed.thresholds) Object.assign(APP_CONFIG.thresholds, parsed.thresholds);
     } catch (e) {
       console.warn('Failed to parse saved config from localStorage', e);
-    }
+  // Auto-heal legacy or invalid hostnames and device IDs in localStorage
+  if (!APP_CONFIG.thingsboard.serverUrl || APP_CONFIG.thingsboard.serverUrl.includes('thingsboard.cloud') || APP_CONFIG.thingsboard.serverUrl.startsWith('http://')) {
+    APP_CONFIG.thingsboard.serverUrl = 'https://demo.thingsboard.io';
+  }
+  if (!APP_CONFIG.thingsboard.deviceId || APP_CONFIG.thingsboard.deviceId === '78a59480-7f91-11ee-b962-e95bb39c298b') {
+    APP_CONFIG.thingsboard.deviceId = '81383a60-bb11-11f1-9681-6110e8f55c0f';
   }
 
   // Update DOM readouts
