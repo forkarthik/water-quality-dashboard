@@ -1,41 +1,12 @@
 /**
  * =========================================================================================
- * Project: IoT-Based Water Quality Monitoring & Early-Warning System (Rural Community Prototype)
- * Target MCU: ESP32 Development Board (NodeMCU / ESP32-WROOM-32)
- * Core Sensors: Analog TDS Sensor, Analog Turbidity Sensor
- * User Interface: 16x2 I2C LCD, Warning Red LED, NPN-Driven Alert Buzzer
- * Cloud Platform: ThingsBoard Community Edition (demo.thingsboard.io) via Wi-Fi HTTP POST
- * Future Expansion: SIM7600E-H 4G Cellular Telemetry, SMS Alerts
- * =========================================================================================
- * 
- * HARDWARE WIRING SUMMARY:
- * -----------------------------------------------------------------------------------------
- * 1. TDS Module:
- *    - VCC  --> ESP32 3V3 (Ensures signal output remains <= 2.3V, safely below ESP32 3.3V ADC limit)
- *    - GND  --> ESP32 GND
- *    - AOUT --> GPIO 34 (ESP32 ADC1_CH6)
- * 
- * 2. Turbidity Module:
- *    - VCC  --> ESP32 VIN (5V from USB; required for sufficient IR photodiode emission)
- *    - GND  --> ESP32 Common GND
- *    - AOUT --> Voltage Divider input (R1 = 10 kΩ, R2 = 22 kΩ to GND)
- *               Divider midpoint connects to GPIO 35 (ADC1_CH7). Max output ~3.09V <= 3.3V
- * 
- * 3. 16x2 I2C LCD:
- *    - VCC  --> ESP32 VIN (5V) or 3V3 (Depends on LCD module, 5V recommended for high contrast)
- *    - GND  --> ESP32 Common GND
- *    - SDA  --> GPIO 21
- *    - SCL  --> GPIO 22
- * 
- * 4. Alert Red LED:
- *    - GPIO 25 --> 220 Ω Resistor --> LED Anode (+)
- *    - LED Cathode (-) --> ESP32 GND
- * 
- * 5. Alert Buzzer (Driven by 2N2222 NPN Transistor):
- *    - GPIO 19 --> 1 kΩ Base Resistor --> 2N2222 Base (Pin 2)
- *    - 2N2222 Emitter (Pin 3) --> ESP32 Common GND
- *    - Buzzer (-) Pin --> 2N2222 Collector (Pin 1)
- *    - Buzzer (+) Pin --> ESP32 VIN (5V)
+ * Project: IoT-Based Water Quality Monitoring & Early-Warning System (Refined & Bulletproof)
+ * Target MCU: ESP32 (NodeMCU-32S / ESP32-WROOM-32)
+ * Core Sensors: Analog TDS (GPIO 34), Analog Turbidity (GPIO 35 via 10k/22k divider)
+ * Local Output: 16x2 I2C LCD (Auto-detects 0x27/0x3F), Red Alert LED (GPIO 25), Buzzer (GPIO 19 via 2N2222)
+ * Cloud: ThingsBoard Community (demo.thingsboard.io)
+ * Device ID: 81383a60-bb11-11f1-9681-6110e8f55c0f
+ * Access Token: srod8p832i6y1eh2cgn2
  * =========================================================================================
  */
 
@@ -45,164 +16,222 @@
 #include <HTTPClient.h>
 
 // =========================================================================================
-// 1. PIN DEFINITIONS & HARDWARE CONSTANTS
+// 1. HARDWARE PIN DEFINITIONS
 // =========================================================================================
-#define PIN_TDS_ADC        34      // ADC1_CH6 (Input-only pin, no WiFi conflict)
-#define PIN_TURBIDITY_ADC  35      // ADC1_CH7 (Input-only pin, no WiFi conflict)
-#define PIN_LED_WARN       25      // Digital output for Red Warning LED (via 220R)
-#define PIN_BUZZER         19      // Digital output for Buzzer Driver (via 1k to 2N2222 base)
+#define PIN_TDS_ADC        34      // ADC1_CH6 (TDS sensor analog output)
+#define PIN_TURBIDITY_ADC  35      // ADC1_CH7 (Turbidity analog output via 10k/22k divider)
+#define PIN_LED_WARN       25      // Red Warning LED (via 220R)
+#define PIN_BUZZER         19      // Buzzer Driver (via 1k to 2N2222 base)
 
-#define I2C_SDA_PIN        21      // Default ESP32 Hardware I2C Data
-#define I2C_SCL_PIN        22      // Default ESP32 Hardware I2C Clock
+#define I2C_SDA_PIN        21      // Hardware I2C SDA
+#define I2C_SCL_PIN        22      // Hardware I2C SCL
 
-// LCD Configuration: Address 0x27 (or 0x3F), 16 columns, 2 rows
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+// Dynamic LCD pointer (allows auto-detection of 0x27 or 0x3F)
+LiquidCrystal_I2C* lcd = nullptr;
+uint8_t lcdI2CAddress = 0x27;       // Default, will be auto-scanned in setup
 
 // =========================================================================================
 // 2. WI-FI & THINGSBOARD CLOUD CONFIGURATION
 // =========================================================================================
-// Replace with your local Wi-Fi credentials (e.g. mobile hotspot or router)
-const char* WIFI_SSID           = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD       = "YOUR_WIFI_PASSWORD";
+// IMPORTANT: ESP32 only connects to 2.4 GHz Wi-Fi (NOT 5 GHz).
+// If using phone hotspot, ensure "Maximize Compatibility" (2.4 GHz) is turned ON.
+const char* WIFI_SSID           = "YOUR_WIFI_SSID";       // <-- REPLACE WITH YOUR WI-FI / HOTSPOT NAME
+const char* WIFI_PASSWORD       = "YOUR_WIFI_PASSWORD";   // <-- REPLACE WITH YOUR WI-FI PASSWORD
 
-// ThingsBoard Server & Device Access Token
+// Pre-configured with your exact ThingsBoard details:
 const char* TB_SERVER           = "http://demo.thingsboard.io";
 const char* TB_ACCESS_TOKEN     = "srod8p832i6y1eh2cgn2";
 
 // =========================================================================================
 // 3. OPERATIONAL & CALIBRATION CONSTANTS
 // =========================================================================================
-const int   SAMPLE_SAMPLES_COUNT   = 30;     // Multisampling window for noise filtering
+const int   SAMPLE_COUNT            = 30;     // Multisampling noise filter
+const float TURBIDITY_DIVIDER_RATIO = (22.0f + 10.0f) / 22.0f; // 10k/22k divider reconstruction ~1.4545
+const float DEFAULT_TEMPERATURE     = 25.0f;  // Standard reference baseline
+const float TDS_CALIBRATION_FACTOR  = 0.5f;   // Standard EC to TDS conversion
 
-// Voltage Divider Factor for Turbidity Sensor:
-// Sensor Vout (up to 4.5V) divided by R1 = 10k, R2 = 22k -> V_adc = V_sensor * (22 / 32)
-// Reconstruct true sensor voltage: V_sensor = V_adc * (32 / 22) = V_adc * 1.4545
-const float TURBIDITY_DIVIDER_RATIO = (22.0f + 10.0f) / 22.0f;
+// Screening Thresholds (IS 10500:2012 / WHO)
+const float TDS_ACCEPTABLE_MAX      = 300.0f; // ppm
+const float TDS_PERMISSIBLE_MAX     = 500.0f; // ppm
+const float TURB_ACCEPTABLE_MAX     = 1.0f;   // NTU
+const float TURB_PERMISSIBLE_MAX    = 5.0f;   // NTU
 
-// Temperature baseline (since no DS18B20 is fitted, assume standard lab baseline 25.0 C)
-const float DEFAULT_TEMPERATURE    = 25.0f;
+// Non-blocking Timing Loops
+const unsigned long SENSOR_INTERVAL_MS = 1000; // Refresh LCD & sensors every 1 second
+const unsigned long CLOUD_INTERVAL_MS  = 5000; // Upload to ThingsBoard every 5 seconds
+const unsigned long WIFI_RETRY_MS      = 10000;// Retry Wi-Fi reconnect every 10 seconds
 
-// Calibration Multipliers & Offsets (Standard gravity EC to TDS factor)
-const float TDS_CALIBRATION_FACTOR = 0.5f;
-
-// Water Quality Screening Thresholds (Derived from WHO & Indian Standard IS 10500:2012)
-const float TDS_ACCEPTABLE_MAX     = 300.0f; // ppm (Desirable drinking limit)
-const float TDS_PERMISSIBLE_MAX    = 500.0f; // ppm (Permissible upper limit)
-
-const float TURB_ACCEPTABLE_MAX    = 1.0f;   // NTU (Desirable limit for clear water)
-const float TURB_PERMISSIBLE_MAX   = 5.0f;   // NTU (Maximum permissible limit)
-
-// System Timing Configuration (Non-blocking Millis Loop)
-const unsigned long SENSOR_READ_INTERVAL_MS = 1500; // Sensor sampling: 1.5 seconds
-const unsigned long LCD_PAGE_INTERVAL_MS    = 3000; // Alternating LCD screens: 3 seconds
-const unsigned long TB_UPLOAD_INTERVAL_MS   = 5000; // Cloud telemetry upload: 5 seconds
-
-unsigned long lastSensorReadTime            = 0;
-unsigned long lastLcdSwitchTime             = 0;
-unsigned long lastTbUploadTime              = 0;
-int lcdDisplayMode                          = 0;
+unsigned long lastSensorTime = 0;
+unsigned long lastCloudTime  = 0;
+unsigned long lastWifiRetry  = 0;
 
 // =========================================================================================
-// 4. ENUMERATIONS & SYSTEM STATE
+// 4. DATA STRUCTURES & SYSTEM STATE
 // =========================================================================================
 enum WaterQualityStatus {
-  STATUS_SAFE,      // Within desirable baseline limits
-  STATUS_CAUTION,   // Elevated parameters (approaching permissible thresholds)
-  STATUS_ALERT      // Exceeds permissible guidelines (High particulate/salinity risk)
+  STATUS_SAFE,
+  STATUS_CAUTION,
+  STATUS_ALERT
 };
 
 struct WaterMetrics {
-  float tdsRawVoltage;
+  float tdsVoltage;
   float tdsPpm;
-  float turbRawVoltage;
+  float turbVoltage;
   float turbNtu;
   WaterQualityStatus status;
-} currentMetrics;
+} metrics;
 
 // =========================================================================================
 // 5. FUNCTION DECLARATIONS
 // =========================================================================================
 void initHardware();
-void connectWiFi();
-void readTDS(WaterMetrics &metrics);
-void readTurbidity(WaterMetrics &metrics);
-void checkThresholds(WaterMetrics &metrics);
-void controlAlerts(const WaterMetrics &metrics);
-void updateLCD(const WaterMetrics &metrics);
-void printSerialTelemetry(const WaterMetrics &metrics);
-void sendThingsBoardTelemetry(const WaterMetrics &metrics);
-float readAveragedAdcMilliVolts(uint8_t pin, int samples);
+uint8_t scanI2CAddress();
+void initLCDAuto();
+void maintainWiFiConnection();
+void readTDS();
+void readTurbidity();
+void evaluateThresholds();
+void handleAlertOutputs();
+void updateLCDDisplay();
+void printDiagnostics();
+void uploadToThingsBoard();
+float sampleADCmilliVolts(uint8_t pin, int samples);
 
 // =========================================================================================
-// 6. ARDUINO SETUP
+// 6. SETUP
 // =========================================================================================
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  delay(1000);
 
   Serial.println(F("\n======================================================="));
-  Serial.println(F(" RURAL WATER QUALITY MONITORING & EARLY WARNING SYSTEM "));
-  Serial.println(F(" Core MCU: ESP32 | Target: Multi-parameter Screening   "));
+  Serial.println(F(" SMART WATER QUALITY MONITORING NODE (ESP32)           "));
+  Serial.println(F(" Cloud: demo.thingsboard.io                            "));
+  Serial.println(F(" Token: srod8p832i6y1eh2cgn2                           "));
   Serial.println(F("======================================================="));
 
   initHardware();
 
-  // Initial Splash Screen on 16x2 LCD
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Water Monitor");
-  lcd.setCursor(0, 1);
-  lcd.print("Connecting WiFi");
+  // Non-blocking Wi-Fi connect attempt (max 5s in setup, won't freeze system if no Wi-Fi)
+  Serial.print(F("[WIFI] Connecting to: "));
+  Serial.println(WIFI_SSID);
 
-  // Attempt Wi-Fi Connection
-  connectWiFi();
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  delay(1200);
-  lcd.clear();
+  unsigned long startWifi = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startWifi < 6000) {
+    delay(400);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(F("\n[WIFI] Connected! Local IP: "));
+    Serial.println(WiFi.localIP());
+    if (lcd) {
+      lcd->clear();
+      lcd->setCursor(0, 0);
+      lcd->print("WiFi Connected!");
+      lcd->setCursor(0, 1);
+      lcd->print(WiFi.localIP());
+      delay(1500);
+    }
+  } else {
+    Serial.println(F("\n[WIFI] Not connected. Running in LOCAL SENSOR MODE."));
+    if (lcd) {
+      lcd->clear();
+      lcd->setCursor(0, 0);
+      lcd->print("No WiFi Found");
+      lcd->setCursor(0, 1);
+      lcd->print("Running Local...");
+      delay(1500);
+    }
+  }
+
+  if (lcd) lcd->clear();
 }
 
 // =========================================================================================
-// 7. ARDUINO MAIN LOOP (Non-Blocking Cooperative Scheduling)
+// 7. MAIN LOOP (Completely Non-Blocking)
 // =========================================================================================
 void loop() {
-  unsigned long currentMillis = millis();
+  unsigned long now = millis();
 
-  // Periodic Sensor Acquisition & Processing (Every 1.5s)
-  if (currentMillis - lastSensorReadTime >= SENSOR_READ_INTERVAL_MS) {
-    lastSensorReadTime = currentMillis;
+  // 1. Maintain Wi-Fi in background without blocking sensors
+  maintainWiFiConnection();
 
-    readTDS(currentMetrics);
-    readTurbidity(currentMetrics);
-    checkThresholds(currentMetrics);
-    controlAlerts(currentMetrics);
-    printSerialTelemetry(currentMetrics);
+  // 2. Read Sensors, Refresh LCD, and Trigger Local Alerts (Every 1 Second)
+  if (now - lastSensorTime >= SENSOR_INTERVAL_MS) {
+    lastSensorTime = now;
+
+    readTDS();
+    readTurbidity();
+    evaluateThresholds();
+    handleAlertOutputs();
+    updateLCDDisplay();
+    printDiagnostics();
   }
 
-  // Periodic LCD Display Multiplexing (Every 3s)
-  if (currentMillis - lastLcdSwitchTime >= LCD_PAGE_INTERVAL_MS) {
-    lastLcdSwitchTime = currentMillis;
-    lcdDisplayMode = !lcdDisplayMode;
-    updateLCD(currentMetrics);
-  }
-
-  // Periodic ThingsBoard Cloud Upload (Every 5s)
-  if (currentMillis - lastTbUploadTime >= TB_UPLOAD_INTERVAL_MS) {
-    lastTbUploadTime = currentMillis;
-    sendThingsBoardTelemetry(currentMetrics);
+  // 3. Upload Telemetry to ThingsBoard (Every 5 Seconds)
+  if (now - lastCloudTime >= CLOUD_INTERVAL_MS) {
+    lastCloudTime = now;
+    uploadToThingsBoard();
   }
 }
 
 // =========================================================================================
-// 8. MODULAR IMPLEMENTATIONS
+// 8. I2C AUTO-SCAN & LCD INITIALIZATION
 // =========================================================================================
 
 /**
- * @brief Initializes GPIO modes, ADC configuration, and I2C LCD.
+ * @brief Scans I2C bus to find whether the LCD is at 0x27, 0x3F, or another address.
  */
+uint8_t scanI2CAddress() {
+  Serial.println(F("[I2C] Scanning bus on SDA=21, SCL=22..."));
+  uint8_t detectedAddr = 0;
+
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t error = Wire.endTransmission();
+
+    if (error == 0) {
+      Serial.printf("[I2C] Device found at address 0x%02X\n", addr);
+      if (addr == 0x27 || addr == 0x3F) {
+        detectedAddr = addr;
+      }
+    }
+  }
+
+  if (detectedAddr == 0) {
+    Serial.println(F("[I2C] WARNING: No standard LCD address (0x27 or 0x3F) found. Defaulting to 0x27."));
+    detectedAddr = 0x27;
+  }
+  return detectedAddr;
+}
+
+void initLCDAuto() {
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  delay(100);
+
+  lcdI2CAddress = scanI2CAddress();
+  Serial.printf("[LCD] Initializing LiquidCrystal_I2C at 0x%02X...\n", lcdI2CAddress);
+
+  lcd = new LiquidCrystal_I2C(lcdI2CAddress, 16, 2);
+  lcd->init();
+  lcd->backlight();
+  lcd->clear();
+
+  lcd->setCursor(0, 0);
+  lcd->print("Water Monitor");
+  lcd->setCursor(0, 1);
+  lcd->print("System Boot OK");
+  delay(1200);
+}
+
 void initHardware() {
   pinMode(PIN_LED_WARN, OUTPUT);
   pinMode(PIN_BUZZER, OUTPUT);
-
   digitalWrite(PIN_LED_WARN, LOW);
   digitalWrite(PIN_BUZZER, LOW);
 
@@ -212,11 +241,10 @@ void initHardware() {
   analogSetAttenuation(ADC_11db);
   analogReadResolution(12);
 
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  lcd.init();
-  lcd.backlight();
+  // Initialize LCD with auto-detection
+  initLCDAuto();
 
-  // Hardware self-test chirp
+  // Self-test chirp
   digitalWrite(PIN_LED_WARN, HIGH);
   digitalWrite(PIN_BUZZER, HIGH);
   delay(120);
@@ -226,87 +254,73 @@ void initHardware() {
   Serial.println(F("[SYS_INIT] Hardware initialization complete."));
 }
 
-/**
- * @brief Connects to Wi-Fi network with 15-second non-blocking timeout.
- */
-void connectWiFi() {
-  Serial.printf("[WIFI] Connecting to SSID: %s\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println(F("\n[WIFI] Connected successfully!"));
-    Serial.print(F("[WIFI] IP Address: "));
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println(F("\n[WIFI] Connection timed out. Running in standalone local mode."));
+// =========================================================================================
+// 9. WI-FI BACKGROUND MAINTENANCE
+// =========================================================================================
+void maintainWiFiConnection() {
+  if (WiFi.status() != WL_CONNECTED) {
+    unsigned long now = millis();
+    if (now - lastWifiRetry >= WIFI_RETRY_MS) {
+      lastWifiRetry = now;
+      Serial.println(F("[WIFI] Attempting background reconnect..."));
+      WiFi.reconnect();
+    }
   }
 }
 
-/**
- * @brief Reads averaged analog voltage using ESP32 calibrated API.
- */
-float readAveragedAdcMilliVolts(uint8_t pin, int samples) {
+// =========================================================================================
+// 10. SENSOR ACQUISITION & CALCULATIONS
+// =========================================================================================
+
+float sampleADCmilliVolts(uint8_t pin, int samples) {
   uint32_t totalMv = 0;
   for (int i = 0; i < samples; i++) {
     totalMv += analogReadMilliVolts(pin);
-    delayMicroseconds(200);
+    delayMicroseconds(150);
   }
   return (float)totalMv / (float)samples;
 }
 
-/**
- * @brief Acquires TDS sensor voltage and calculates ppm.
- */
-void readTDS(WaterMetrics &metrics) {
-  float voltageMv = readAveragedAdcMilliVolts(PIN_TDS_ADC, SAMPLE_SAMPLES_COUNT);
-  float voltage = voltageMv / 1000.0f;
-  metrics.tdsRawVoltage = voltage;
+void readTDS() {
+  float mv = sampleADCmilliVolts(PIN_TDS_ADC, SAMPLE_COUNT);
+  float voltage = mv / 1000.0f;
+  metrics.tdsVoltage = voltage;
 
-  float compensationCoefficient = 1.0f + 0.02f * (DEFAULT_TEMPERATURE - 25.0f);
-  float compensationVoltage = voltage / compensationCoefficient;
+  // Temperature compensation to 25 C
+  float compCoeff = 1.0f + 0.02f * (DEFAULT_TEMPERATURE - 25.0f);
+  float compVolt = voltage / compCoeff;
 
-  float calculatedTds = (133.42f * pow(compensationVoltage, 3) 
-                       - 255.86f * pow(compensationVoltage, 2) 
-                       + 857.39f * compensationVoltage) * TDS_CALIBRATION_FACTOR;
+  // Gravity standard conversion curve
+  float calculated = (133.42f * pow(compVolt, 3) 
+                    - 255.86f * pow(compVolt, 2) 
+                    + 857.39f * compVolt) * TDS_CALIBRATION_FACTOR;
 
-  if (calculatedTds < 0.0f) calculatedTds = 0.0f;
-  metrics.tdsPpm = calculatedTds;
+  if (calculated < 0.0f) calculated = 0.0f;
+  metrics.tdsPpm = calculated;
 }
 
-/**
- * @brief Acquires Turbidity sensor voltage and computes NTU.
- */
-void readTurbidity(WaterMetrics &metrics) {
-  float adcMv = readAveragedAdcMilliVolts(PIN_TURBIDITY_ADC, SAMPLE_SAMPLES_COUNT);
-  float adcV = adcMv / 1000.0f;
+void readTurbidity() {
+  float mv = sampleADCmilliVolts(PIN_TURBIDITY_ADC, SAMPLE_COUNT);
+  float adcV = mv / 1000.0f;
 
-  float sensorVoltage = adcV * TURBIDITY_DIVIDER_RATIO;
-  metrics.turbRawVoltage = sensorVoltage;
+  // Reconstruct true voltage across 10k/22k divider:
+  float sensorV = adcV * TURBIDITY_DIVIDER_RATIO;
+  metrics.turbVoltage = sensorV;
 
   float ntu = 0.0f;
-  if (sensorVoltage >= 4.10f) {
+  if (sensorV >= 4.10f) {
     ntu = 0.0f;
-  } else if (sensorVoltage <= 2.50f) {
+  } else if (sensorV <= 2.50f) {
     ntu = 3000.0f;
   } else {
-    ntu = -1120.4f * pow(sensorVoltage, 2) + 5742.3f * sensorVoltage - 4352.9f;
+    ntu = -1120.4f * pow(sensorV, 2) + 5742.3f * sensorV - 4352.9f;
   }
 
   if (ntu < 0.0f) ntu = 0.0f;
   metrics.turbNtu = ntu;
 }
 
-/**
- * @brief Assesses sensor values against WHO & IS 10500 standards to classify risk.
- */
-void checkThresholds(WaterMetrics &metrics) {
+void evaluateThresholds() {
   if (metrics.tdsPpm > TDS_PERMISSIBLE_MAX || metrics.turbNtu > TURB_PERMISSIBLE_MAX) {
     metrics.status = STATUS_ALERT;
   } else if (metrics.tdsPpm > TDS_ACCEPTABLE_MAX || metrics.turbNtu > TURB_ACCEPTABLE_MAX) {
@@ -316,20 +330,17 @@ void checkThresholds(WaterMetrics &metrics) {
   }
 }
 
-/**
- * @brief Actuates Red LED and Buzzer based on evaluated status.
- */
-void controlAlerts(const WaterMetrics &metrics) {
+void handleAlertOutputs() {
   switch (metrics.status) {
     case STATUS_ALERT:
       digitalWrite(PIN_LED_WARN, HIGH);
       digitalWrite(PIN_BUZZER, HIGH);
-      delay(80);
+      delay(60);
       digitalWrite(PIN_BUZZER, LOW);
       break;
 
     case STATUS_CAUTION:
-      digitalWrite(PIN_LED_WARN, !digitalRead(PIN_LED_WARN));
+      digitalWrite(PIN_LED_WARN, !digitalRead(PIN_LED_WARN)); // Slow blink
       digitalWrite(PIN_BUZZER, LOW);
       break;
 
@@ -341,51 +352,42 @@ void controlAlerts(const WaterMetrics &metrics) {
   }
 }
 
-/**
- * @brief Updates 16x2 I2C LCD with a 2-page rotating dashboard.
- */
-void updateLCD(const WaterMetrics &metrics) {
-  lcd.clear();
+// =========================================================================================
+// 11. 16x2 I2C LCD DISPLAY LOGIC
+// =========================================================================================
+void updateLCDDisplay() {
+  if (!lcd) return;
 
-  if (lcdDisplayMode == 0) {
-    // PAGE 1: Quantitative Readings
-    lcd.setCursor(0, 0);
-    lcd.print("TDS: ");
-    lcd.print((int)metrics.tdsPpm);
-    lcd.print(" ppm");
+  char row0[17];
+  char row1[17];
 
-    lcd.setCursor(0, 1);
-    lcd.print("Turb: ");
-    lcd.print(metrics.turbNtu, 1);
-    lcd.print(" NTU");
-  } else {
-    // PAGE 2: Status & Wi-Fi indicator
-    lcd.setCursor(0, 0);
-    lcd.print("Status: ");
-    if (metrics.status == STATUS_SAFE)        lcd.print("SAFE");
-    else if (metrics.status == STATUS_CAUTION) lcd.print("CAUTION");
-    else                                      lcd.print("ALERT!");
+  const char* cloudTag = (WiFi.status() == WL_CONNECTED) ? "TB" : "NC";
+  const char* statTag  = "SAFE";
+  if (metrics.status == STATUS_ALERT)   statTag = "ALRT";
+  if (metrics.status == STATUS_CAUTION) statTag = "WARN";
 
-    lcd.setCursor(0, 1);
-    if (WiFi.status() == WL_CONNECTED) {
-      lcd.print("Cloud: OK (TB)");
-    } else {
-      lcd.print("Cloud: No WiFi");
-    }
-  }
+  // Row 0: "TDS: 285ppm  [TB]" (Exactly 16 characters)
+  snprintf(row0, sizeof(row0), "TDS:%4dppm [%2s]", (int)metrics.tdsPpm, cloudTag);
+
+  // Row 1: "NTU: 1.4  [SAFE]" (Exactly 16 characters)
+  snprintf(row1, sizeof(row1), "NTU:%4.1f  [%4s]", metrics.turbNtu, statTag);
+
+  lcd->setCursor(0, 0);
+  lcd->print(row0);
+
+  lcd->setCursor(0, 1);
+  lcd->print(row1);
 }
 
-/**
- * @brief Prints clean, structured telemetry to the Serial Monitor.
- */
-void printSerialTelemetry(const WaterMetrics &metrics) {
-  Serial.print(F("[TIME: "));
-  Serial.print(millis() / 1000);
-  Serial.print(F("s] | TDS: "));
-  Serial.print(metrics.tdsPpm, 1);
-  Serial.print(F(" ppm | Turb: "));
-  Serial.print(metrics.turbNtu, 1);
-  Serial.print(F(" NTU | Status: "));
+// =========================================================================================
+// 12. SERIAL MONITOR TELEMETRY
+// =========================================================================================
+void printDiagnostics() {
+  Serial.printf("[SEC: %4lu] | TDS: %4.1f ppm (V=%1.2f) | Turb: %3.1f NTU (V=%1.2f) | WiFi: %s | Status: ",
+                millis() / 1000,
+                metrics.tdsPpm, metrics.tdsVoltage,
+                metrics.turbNtu, metrics.turbVoltage,
+                (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "OFFLINE");
 
   switch (metrics.status) {
     case STATUS_SAFE:    Serial.println(F("SAFE")); break;
@@ -394,11 +396,10 @@ void printSerialTelemetry(const WaterMetrics &metrics) {
   }
 }
 
-/**
- * @brief Streams telemetry directly to ThingsBoard using HTTP POST.
- * Endpoint: http://demo.thingsboard.io/api/v1/{ACCESS_TOKEN}/telemetry
- */
-void sendThingsBoardTelemetry(const WaterMetrics &metrics) {
+// =========================================================================================
+// 13. CLOUD TELEMETRY UPLOAD TO THINGSBOARD
+// =========================================================================================
+void uploadToThingsBoard() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("[TB_UPLOAD] Wi-Fi not connected. Skipping cloud upload."));
     return;
@@ -406,29 +407,31 @@ void sendThingsBoardTelemetry(const WaterMetrics &metrics) {
 
   HTTPClient http;
   String url = String(TB_SERVER) + "/api/v1/" + String(TB_ACCESS_TOKEN) + "/telemetry";
+
   http.begin(url);
+  http.setTimeout(3500); // 3.5s timeout prevents hanging the system
   http.addHeader("Content-Type", "application/json");
 
-  // Determine status string
   String statusStr = "NORMAL";
   if (metrics.status == STATUS_ALERT)   statusStr = "ALERT";
   if (metrics.status == STATUS_CAUTION) statusStr = "WARNING";
 
-  // Construct JSON payload matching dashboard telemetry keys
-  String jsonPayload = "{";
-  jsonPayload += "\"tds\":" + String(metrics.tdsPpm, 1) + ",";
-  jsonPayload += "\"turbidity\":" + String(metrics.turbNtu, 1) + ",";
-  jsonPayload += "\"status\":\"" + statusStr + "\"";
-  jsonPayload += "}";
+  // Construct JSON payload
+  String json = "{";
+  json += "\"tds\":" + String(metrics.tdsPpm, 1) + ",";
+  json += "\"turbidity\":" + String(metrics.turbNtu, 1) + ",";
+  json += "\"status\":\"" + statusStr + "\"";
+  json += "}";
 
-  int httpResponseCode = http.POST(jsonPayload);
+  Serial.print(F("[TB_UPLOAD] Uploading: "));
+  Serial.println(json);
 
-  if (httpResponseCode == 200) {
-    Serial.print(F("[TB_UPLOAD] Success! Data sent: "));
-    Serial.println(jsonPayload);
+  int httpCode = http.POST(json);
+
+  if (httpCode == 200) {
+    Serial.println(F("[TB_UPLOAD] SUCCESS! HTTP 200 OK received from ThingsBoard."));
   } else {
-    Serial.print(F("[TB_UPLOAD] Failed, HTTP error code: "));
-    Serial.println(httpResponseCode);
+    Serial.printf("[TB_UPLOAD] FAILED! HTTP Error Code: %d\n", httpCode);
   }
 
   http.end();
