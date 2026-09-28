@@ -14,8 +14,8 @@ const APP_CONFIG = {
 
   // ThingsBoard API Configuration (Can be customized via Settings Modal and saved in localStorage)
   thingsboard: {
-    serverUrl: 'https://thingsboard.cloud', // Default ThingsBoard Cloud / CE instance
-    deviceId: '78a59480-7f91-11ee-b962-e95bb39c298b',
+    serverUrl: 'http://demo.thingsboard.io', // ThingsBoard Demo instance
+    deviceId: '81383a60-bb11-11f1-9681-6110e8f55c0f', // User's device UUID
     publicToken: '', // Read-only public dashboard token or JWT
     pollIntervalMs: 5000,
     keys: {
