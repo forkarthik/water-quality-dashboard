@@ -363,24 +363,47 @@
 
         <!-- Tab 1: API Settings -->
         <div class="tab-pane active" id="tab-api">
-          <p class="tab-description">Configure the ThingsBoard server connection. Use a public/read-only token or backend proxy to ensure credentials remain secure on GitHub Pages.</p>
+          <p class="tab-description">Connect to ThingsBoard to stream live telemetry from your ESP32. ThingsBoard requires authentication to read device telemetry.</p>
           
+          <!-- Quick Authentication Box -->
+          <div class="auth-helper-box" style="background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.3); border-radius: 8px; padding: 14px; margin-bottom: 16px;">
+            <h4 style="font-size: 0.88rem; color: #38bdf8; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+              <i class="fa-solid fa-lock-open"></i> Quick ThingsBoard Authentication
+            </h4>
+            <p style="font-size: 0.78rem; color: #bae6fd; margin-bottom: 10px;">
+              Enter your ThingsBoard account login to automatically generate an authorization token and unlock live streaming.
+            </p>
+            <div class="form-row">
+              <div class="form-group half">
+                <label for="tbEmail">ThingsBoard Email / Username</label>
+                <input type="text" id="tbEmail" placeholder="your-email@example.com">
+              </div>
+              <div class="form-group half">
+                <label for="tbPassword">ThingsBoard Password</label>
+                <input type="password" id="tbPassword" placeholder="Your password">
+              </div>
+            </div>
+            <button type="button" class="btn-primary" id="btnAuthLogin" style="width: 100%; margin-top: 4px; padding: 9px 14px; font-size: 0.84rem;">
+              <i class="fa-solid fa-key"></i> Authenticate & Connect Live Stream
+            </button>
+          </div>
+
           <div class="form-group">
             <label for="cfgServerUrl">ThingsBoard Server URL</label>
-            <input type="text" id="cfgServerUrl" placeholder="https://thingsboard.cloud or http://demo.thingsboard.io">
-            <span class="help-text">Your ThingsBoard Community or Professional Edition endpoint.</span>
+            <input type="text" id="cfgServerUrl" value="http://demo.thingsboard.io" placeholder="http://demo.thingsboard.io">
+            <span class="help-text">Endpoint where your ESP32 is registered.</span>
           </div>
 
           <div class="form-group">
             <label for="cfgDeviceId">Device ID (UUID)</label>
-            <input type="text" id="cfgDeviceId" placeholder="e.g. 78a59480-7f91-11ee-b962-e95bb39c298b">
-            <span class="help-text">Found under ThingsBoard &gt; Devices &gt; Device Details.</span>
+            <input type="text" id="cfgDeviceId" value="81383a60-bb11-11f1-9681-6110e8f55c0f" placeholder="e.g. 81383a60-bb11-11f1-9681-6110e8f55c0f">
+            <span class="help-text">Your device UUID from ThingsBoard.</span>
           </div>
 
           <div class="form-group">
-            <label for="cfgPublicToken">Public Dashboard / Read-Only JWT Token</label>
-            <input type="password" id="cfgPublicToken" placeholder="Leave empty for simulated/demo mode">
-            <span class="help-text">Never use tenant admin secrets here. Use public dashboard sharing tokens.</span>
+            <label for="cfgPublicToken">Active Authorization Token (JWT or Public Token)</label>
+            <input type="password" id="cfgPublicToken" placeholder="Filled automatically when you authenticate above">
+            <span class="help-text">Saved securely in your browser's localStorage. Never sent to GitHub.</span>
           </div>
 
           <div class="form-row">

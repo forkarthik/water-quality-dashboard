@@ -283,19 +283,30 @@ async function fetchThingsBoardLiveTelemetry() {
     return;
   }
 
+  // Check if a token is configured
+  if (!cfg.publicToken) {
+    setConnectionStatus('AUTH REQ', 'warn');
+    showToast('Authentication required: Click ⚙ Settings to log in and connect live stream.', 'warn');
+    setMode('demo');
+    return;
+  }
+
   // Sanitize server URL
   const baseUrl = cfg.serverUrl.replace(/\/+$/, '');
   const keys = `${cfg.keys.tds},${cfg.keys.turbidity},${cfg.keys.status}`;
   const url = `${baseUrl}/api/plugins/telemetry/DEVICE/${cfg.deviceId}/values/timeseries?keys=${keys}`;
 
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (cfg.publicToken) {
-      // If a JWT token or public token is provided
-      headers['X-Authorization'] = `Bearer ${cfg.publicToken}`;
-    }
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Authorization': `Bearer ${cfg.publicToken}`
+    };
 
     const response = await fetch(url, { method: 'GET', headers: headers });
+
+    if (response.status === 401) {
+      throw new Error('401 Unauthorized: ThingsBoard Token expired or invalid. Re-authenticate in Settings (⚙).');
+    }
 
     if (!response.ok) {
       throw new Error(`HTTP Error ${response.status}: ${response.statusText}`);
@@ -328,11 +339,11 @@ async function fetchThingsBoardLiveTelemetry() {
     appendChartPoint(state.currentMetrics.tds, state.currentMetrics.turbidity);
   } catch (error) {
     console.error('[ThingsBoard Error]:', error);
-    setConnectionStatus('TB OFFLINE', 'alert');
+    setConnectionStatus('TB ERROR', 'alert');
     state.currentMetrics.deviceOnline = false;
     renderDeviceOffline();
-    addAlert('ESP32 / ThingsBoard Offline', 'No Response', 'CRITICAL');
-    showToast(`ThingsBoard sync failed: ${error.message}`, 'alert');
+    addAlert('ThingsBoard Live Sync Failed', error.message, 'CRITICAL');
+    showToast(`${error.message}`, 'alert');
   }
 }
 
@@ -717,6 +728,57 @@ function bindEventListeners() {
       updateChartRange(btn.dataset.range);
     });
   });
+
+  // Quick ThingsBoard Login & Token Generator
+  const btnAuthLogin = document.getElementById('btnAuthLogin');
+  if (btnAuthLogin) {
+    btnAuthLogin.addEventListener('click', async () => {
+      const email = document.getElementById('tbEmail').value.trim();
+      const password = document.getElementById('tbPassword').value;
+      const serverUrl = (elements.cfgServerUrl.value.trim() || 'http://demo.thingsboard.io').replace(/\/+$/, '');
+
+      if (!email || !password) {
+        showToast('Please enter your ThingsBoard email and password.', 'warn');
+        return;
+      }
+
+      btnAuthLogin.disabled = true;
+      btnAuthLogin.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Authenticating...';
+
+      try {
+        const resp = await fetch(`${serverUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ username: email, password: password })
+        });
+
+        if (!resp.ok) {
+          throw new Error(`Login failed (HTTP ${resp.status}): Check your ThingsBoard email and password.`);
+        }
+
+        const authData = await resp.json();
+        if (authData.token) {
+          elements.cfgPublicToken.value = authData.token;
+          APP_CONFIG.thingsboard.publicToken = authData.token;
+          APP_CONFIG.thingsboard.serverUrl = serverUrl;
+          APP_CONFIG.thingsboard.deviceId = elements.cfgDeviceId.value.trim();
+
+          savePreferences();
+          showToast('Authentication successful! Live telemetry connected.', 'safe');
+          setMode('live');
+          closeSettingsModal();
+        } else {
+          throw new Error('No authorization token received in response.');
+        }
+      } catch (err) {
+        console.error('ThingsBoard Auth Error:', err);
+        showToast(err.message, 'alert');
+      } finally {
+        btnAuthLogin.disabled = false;
+        btnAuthLogin.innerHTML = '<i class="fa-solid fa-key"></i> Authenticate & Connect Live Stream';
+      }
+    });
+  }
 }
 
 function setMode(mode) {
